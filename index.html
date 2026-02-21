@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>SecretMsg — Messages Confidentiels</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+  import { getFirestore, collection, addDoc, query, where, onSnapshot, orderBy, doc, updateDoc, serverTimestamp, or, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAOCSSbFYSB-u3Bk20etUrb0XWiFkNk4hE",
+    authDomain: "secretmsg-53c38.firebaseapp.com",
+    projectId: "secretmsg-53c38",
+    storageBucket: "secretmsg-53c38.firebasestorage.app",
+    messagingSenderId: "796017444953",
+    appId: "1:796017444953:web:d3f8dad282c6ec16eb0948"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  let currentUser = null;
+  let pinBuffer = '';
+  let selectedMessage = null;
+  let unsubscribeMessages = null;
+
+  // ── AUTH STATE ──
+  onAuthStateChanged(auth, user => {
+    if (user) {
+      currentUser = user;
+      showScreen('screenMessages');
+      setNav('nav-messages');
+      document.getElementById('profileName').textContent = user.displayName || user.email;
+      loadMessages();
+    } else {
+      currentUser = null;
+      showScreen('screenAuth');
+      if (unsubscribeMessages) unsubscribeMessages();
+    }
+  });
+
+  // ── INSCRIPTION ──
+  window.register = async () => {
+    const name = document.getElementById('regName').value.trim();
+    const email = document.getElementById('regEmail').value.trim();
+    const pass = document.getElementById('regPass').value;
+    const err = document.getElementById('authError');
+    if (!name || !email || !pass) { err.textContent = 'Remplissez tous les champs.'; return; }
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      await updateProfile(cred.user, { displayName: name });
+    } catch(e) {
+      err.textContent = e.code === 'auth/email-already-in-use' ? 'Email déjà utilisé.' :
+                        e.code === 'auth/weak-password' ? 'Mot de passe trop court (6 caractères min).' :
+                        'Erreur : ' + e.message;
+    }
+  };
+
+  // ── CONNEXION ──
+  window.login = async () => {
+    const email = document.getElementById('loginEmail').value.trim();
+    const pass = document.getElementById('loginPass').value;
+    const err = document.getElementById('authError');
+    try {
+      await signInWithEmailAndPassword(auth, email, pass);
+    } catch(e) {
+      err.textContent = 'Email ou mot de passe incorrect.';
+    }
+  };
+
+  // ── DÉCONNEXION ──
+  window.logout = async () => {
+    await signOut(auth);
+  };
+
+  // ── ENVOYER MESSAGE ──
+  window.sendMessage = async () => {
+    const to = document.getElementById('sendTo').value.trim();
+    const msg = document.getElementById('sendMsg').value.trim();
+    const pin = document.getElementById('sendPin').value.trim();
+    const err = document.getElementById('sendError');
+
+    if (!to || !msg || !pin) { err.textContent = 'Remplissez tous les champs.'; return; }
+    if (pin.length !== 4 || isNaN(pin)) { err.textContent = 'Le code doit être 4 chiffres.'; return; }
+
+    // Chercher le destinataire par email ou nom
+    try {
+      err.textContent = '';
+      document.getElementById('sendBtn').textContent = 'Envoi...';
+
+      await addDoc(collection(db, 'messages'), {
+        from: currentUser.displayName || currentUser.email,
+        fromUid: currentUser.uid,
+        fromEmail: currentUser.email,
+        to: to,
+        message: msg,
+        pin: pin,
+        read: false,
+        createdAt: serverTimestamp()
+      });
+
+      document.getElementById('sendTo').value = '';
+      document.getElementById('sendMsg').value = '';
+      document.getElementById('sendPin').value = '';
+      document.getElementById('sendBtn').textContent = '✦ Envoyer le message secret';
+      showSuccess();
+    } catch(e) {
+      err.textContent = 'Erreur envoi : ' + e.message;
+      document.getElementById('sendBtn').textContent = '✦ Envoyer le message secret';
+    }
+  };
+
+  // ── CHARGER MESSAGES ──
+  function loadMessages() {
+    if (!currentUser) return;
+    const q = query(
+      collection(db, 'messages'),
+      where('to', 'in', [currentUser.email, currentUser.displayName || ''])
+    );
+
+    unsubscribeMessages = onSnapshot(q, snapshot => {
+      const list = document.getElementById('msgList');
+      list.innerHTML = '';
+      let unread = 0;
+
+      const docs = [];
+      snapshot.forEach(d => docs.push({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+
+      if (docs.length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px 0;font-size:13px;">Aucun message reçu pour l\'instant</div>';
+        return;
+      }
+
+      docs.forEach(data => {
+        if (!data.read) unread++;
+        const time = data.createdAt ? new Date(data.createdAt.seconds * 1000).toLocaleTimeString('fr', {hour:'2-digit',minute:'2-digit'}) : '';
+        const item = document.createElement('div');
+        item.className = 'msg-item' + (!data.read ? ' unread' : '');
+        item.innerHTML = `
+          <div class="msg-avatar">${data.from.charAt(0).toUpperCase()}</div>
+          <div class="msg-info">
+            <div class="msg-from">${data.from}</div>
+            <div class="msg-preview">${data.read ? '🔓 Déjà lu' : '🔒 Message confidentiel'}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+            <div class="msg-time">${time}</div>
+            ${!data.read ? '<div class="msg-badge"></div>' : ''}
+          </div>
+        `;
+        item.onclick = () => openUnlock(data);
+        list.appendChild(item);
+      });
+
+      document.getElementById('unreadBadge').textContent = unread > 0 ? unread : '';
+      document.getElementById('unreadBadge').style.display = unread > 0 ? 'flex' : 'none';
+    });
+  }
+
+  // ── UNLOCK ──
+  window.openUnlock = (data) => {
+    selectedMessage = data;
+    pinBuffer = '';
+    updatePinDisplay();
+    document.getElementById('unlockSender').textContent = 'De : ' + data.from;
+    showScreen('screenUnlock');
+  };
+
+  window.pinInput = (digit) => {
+    if (pinBuffer.length >= 4) return;
+    pinBuffer += digit;
+    updatePinDisplay();
+    if (pinBuffer.length === 4) setTimeout(checkPin, 300);
+  };
+
+  window.pinDel = () => {
+    pinBuffer = pinBuffer.slice(0, -1);
+    updatePinDisplay();
+  };
+
+  function updatePinDisplay() {
+    for (let i = 0; i < 4; i++) {
+      const el = document.getElementById('p' + i);
+      if (i < pinBuffer.length) {
+        el.textContent = '●'; el.classList.add('filled', 'active');
+      } else {
+        el.textContent = '·'; el.classList.remove('filled', 'active');
+      }
+    }
+    document.getElementById('pinError').textContent = '';
+  }
+
+  async function checkPin() {
+    if (pinBuffer === selectedMessage.pin) {
+      // Marquer comme lu
+      if (!selectedMessage.read) {
+        await updateDoc(doc(db, 'messages', selectedMessage.id), { read: true });
+      }
+      document.getElementById('revealText').textContent = '"' + selectedMessage.message + '"';
+      document.getElementById('revealFrom').textContent = '— ' + selectedMessage.from;
+      document.getElementById('revealCard').classList.remove('flipped');
+      showScreen('screenReveal');
+    } else {
+      document.getElementById('pinError').textContent = '❌ Code incorrect, réessayez';
+      pinBuffer = '';
+      updatePinDisplay();
+      // Shake animation
+      document.getElementById('pinInputs').style.animation = 'none';
+      setTimeout(() => document.getElementById('pinInputs').style.animation = 'shake .4s ease', 10);
+    }
+  }
+
+  // ── HELPERS ──
+  function showSuccess() {
+    const o = document.getElementById('successOverlay');
+    o.classList.add('show');
+    setTimeout(() => { o.classList.remove('show'); showScreen('screenMessages'); setNav('nav-messages'); }, 2200);
+  }
+
+  window.showScreen = (id) => {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  };
+
+  window.setNav = (id) => {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    if (id) document.getElementById(id)?.classList.add('active');
+  };
+
+  window.flipCard = (el) => el.classList.toggle('flipped');
+
+  window.showTab = (tab) => {
+    document.getElementById('tabLogin').style.display = tab === 'login' ? 'flex' : 'none';
+    document.getElementById('tabRegister').style.display = tab === 'register' ? 'flex' : 'none';
+    document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    document.getElementById('authError').textContent = '';
+  };
+</script>
+
+<style>
+  :root {
+    --ink: #0d0d0d;
+    --cream: #f5f0e8;
+    --gold: #c9a84c;
+    --red: #c0392b;
+    --surface: #1a1a1a;
+    --surface2: #242424;
+    --border: rgba(201,168,76,0.25);
+    --text-muted: #888;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--ink); color: var(--cream);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh; display: flex; justify-content: center;
+    align-items: flex-start; padding: 20px;
+  }
+  .phone {
+    width: 100%; max-width: 390px;
+    background: var(--surface);
+    border-radius: 44px;
+    border: 1.5px solid var(--border);
+    box-shadow: 0 40px 100px rgba(0,0,0,.7);
+    overflow: hidden; position: relative;
+    min-height: 100dvh; max-height: 860px;
+    display: flex; flex-direction: column;
+  }
+  .notch {
+    width: 120px; height: 28px;
+    background: var(--ink);
+    border-radius: 0 0 18px 18px;
+    margin: 0 auto; flex-shrink: 0;
+  }
+  .screen {
+    display: none; flex-direction: column;
+    flex: 1; padding: 16px 22px 24px;
+    overflow-y: auto; animation: fadeUp .3s ease;
+  }
+  .screen::-webkit-scrollbar { width: 0; }
+  .screen.active { display: flex; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes shake {
+    0%,100% { transform: translateX(0); }
+    25% { transform: translateX(-8px); }
+    75% { transform: translateX(8px); }
+  }
+
+  /* ── HEADER ── */
+  .app-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0 16px; flex-shrink: 0;
+  }
+  .logo { font-family: 'Playfair Display', serif; font-size: 22px; font-style: italic; color: var(--gold); }
+  .logo span { color: var(--cream); font-style: normal; }
+  .icon-btn {
+    width: 38px; height: 38px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; font-size: 16px; transition: border-color .2s;
+  }
+  .icon-btn:hover { border-color: var(--gold); }
+
+  /* ── AUTH SCREEN ── */
+  .auth-wrap { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 20px; }
+  .auth-logo { text-align: center; }
+  .auth-logo .big-logo { font-family: 'Playfair Display', serif; font-size: 36px; font-style: italic; color: var(--gold); }
+  .auth-logo p { font-size: 13px; color: var(--text-muted); margin-top: 6px; }
+  .auth-tabs { display: flex; background: var(--ink); border-radius: 14px; padding: 4px; gap: 4px; }
+  .auth-tab {
+    flex: 1; text-align: center; padding: 9px; border-radius: 10px;
+    font-size: 13px; cursor: pointer; color: var(--text-muted); transition: all .2s;
+  }
+  .auth-tab.active { background: var(--surface2); color: var(--gold); border: 1px solid var(--border); }
+  .auth-form { display: flex; flex-direction: column; gap: 12px; }
+  .form-input {
+    width: 100%; background: var(--ink); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 16px; color: var(--cream);
+    font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none;
+    transition: border-color .2s;
+  }
+  .form-input:focus { border-color: var(--gold); }
+  .form-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--gold); margin-bottom: 4px; display: block; }
+  .form-group { display: flex; flex-direction: column; }
+  .form-textarea {
+    width: 100%; background: var(--ink); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 16px; color: var(--cream);
+    font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none;
+    transition: border-color .2s; resize: none; height: 90px; line-height: 1.6;
+  }
+  .form-textarea:focus { border-color: var(--gold); }
+  .auth-error { color: var(--red); font-size: 12px; text-align: center; min-height: 16px; }
+  .btn-gold {
+    width: 100%; padding: 14px;
+    background: linear-gradient(135deg, var(--gold) 0%, #a07828 100%);
+    border: none; border-radius: 14px;
+    color: var(--ink); font-family: 'DM Sans', sans-serif;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+    transition: opacity .2s, transform .15s;
+  }
+  .btn-gold:hover { opacity: .9; transform: translateY(-1px); }
+
+  /* ── MESSAGES ── */
+  .section-title { font-family: 'Playfair Display', serif; font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+  .section-sub { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; }
+  .msg-list { display: flex; flex-direction: column; gap: 10px; flex: 1; }
+  .msg-item {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 14px; padding: 14px; display: flex; gap: 12px;
+    align-items: center; cursor: pointer;
+    transition: border-color .2s, transform .15s;
+    position: relative; overflow: hidden;
+  }
+  .msg-item::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--gold); transform: scaleY(0); transition: transform .2s; transform-origin: bottom;
+  }
+  .msg-item:hover::before, .msg-item.unread::before { transform: scaleY(1); }
+  .msg-item.unread::before { background: #4a7c9e; }
+  .msg-item:hover { border-color: rgba(201,168,76,.5); transform: translateX(2px); }
+  .msg-avatar {
+    width: 42px; height: 42px; border-radius: 13px;
+    background: linear-gradient(135deg, #2a2418, #1a1a2a);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; font-weight: 700; color: var(--gold); flex-shrink: 0;
+  }
+  .msg-info { flex: 1; min-width: 0; }
+  .msg-from { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
+  .msg-preview { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .msg-time { font-size: 10px; color: var(--text-muted); }
+  .msg-badge { width: 8px; height: 8px; border-radius: 50%; background: #4a7c9e; }
+
+  /* ── FLASHCARD ── */
+  .flashcard-container { perspective: 1000px; width: 100%; margin: 0 auto 16px; }
+  .flashcard {
+    width: 100%; height: 180px; position: relative;
+    transform-style: preserve-3d;
+    transition: transform .6s cubic-bezier(.4,0,.2,1); cursor: pointer;
+  }
+  .flashcard.flipped { transform: rotateY(180deg); }
+  .card-face {
+    position: absolute; inset: 0; border-radius: 22px;
+    backface-visibility: hidden;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 24px;
+  }
+  .card-front { background: linear-gradient(135deg, #1e1a14, #2a2418); border: 1.5px solid var(--gold); }
+  .card-back { background: linear-gradient(135deg, #14181e, #18242a); border: 1.5px solid #4a7c9e; transform: rotateY(180deg); }
+  .card-seal {
+    width: 48px; height: 48px;
+    background: radial-gradient(circle, var(--gold) 0%, #a07828 100%);
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 22px; margin-bottom: 12px;
+    box-shadow: 0 0 24px rgba(201,168,76,.3);
+  }
+  .card-label { font-family: 'Playfair Display', serif; font-size: 15px; letter-spacing: 3px; text-transform: uppercase; color: var(--gold); margin-bottom: 6px; }
+  .card-hint { font-size: 10px; color: var(--text-muted); letter-spacing: 1px; }
+  .card-message-text { font-family: 'Playfair Display', serif; font-size: 14px; font-style: italic; text-align: center; color: var(--cream); line-height: 1.6; }
+  .card-from { margin-top: 12px; font-size: 10px; color: #4a7c9e; letter-spacing: 2px; text-transform: uppercase; }
+  .tap-hint { text-align: center; font-size: 10px; color: var(--text-muted); letter-spacing: 1px; margin-bottom: 16px; }
+
+  /* ── UNLOCK ── */
+  .unlock-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  .lock-icon {
+    width: 72px; height: 72px;
+    background: radial-gradient(circle, rgba(201,168,76,.15) 0%, transparent 70%);
+    border: 1.5px solid var(--gold); border-radius: 22px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 32px; margin-bottom: 20px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(201,168,76,.3); }
+    50% { box-shadow: 0 0 0 14px rgba(201,168,76,0); }
+  }
+  .unlock-title { font-family: 'Playfair Display', serif; font-size: 22px; margin-bottom: 6px; }
+  .unlock-sub { font-size: 12px; color: var(--text-muted); margin-bottom: 24px; }
+  .pin-inputs { display: flex; gap: 10px; margin-bottom: 8px; }
+  .pin-dot {
+    width: 50px; height: 50px; background: var(--surface2);
+    border: 1.5px solid var(--border); border-radius: 13px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 700; color: var(--gold); transition: border-color .2s;
+  }
+  .pin-dot.active { border-color: var(--gold); }
+  .pin-dot.filled { background: rgba(201,168,76,.1); }
+  .pin-error { color: var(--red); font-size: 12px; margin-bottom: 16px; min-height: 18px; }
+  .numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 230px; }
+  .num-key {
+    height: 50px; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 13px; display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 500; cursor: pointer; transition: all .15s;
+  }
+  .num-key:hover { border-color: var(--gold); background: rgba(201,168,76,.08); }
+  .num-key:active { transform: scale(.95); }
+  .num-key.wide { grid-column: span 2; }
+  .num-key.del { color: var(--red); font-size: 13px; }
+
+  /* ── BOTTOM NAV ── */
+  .bottom-nav {
+    display: flex; justify-content: space-around;
+    padding: 10px 0 6px; border-top: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+  }
+  .nav-item {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    cursor: pointer; padding: 5px 18px; border-radius: 12px;
+    color: var(--text-muted); font-size: 10px; transition: all .2s; position: relative;
+  }
+  .nav-item:hover, .nav-item.active { color: var(--gold); }
+  .nav-icon { font-size: 20px; }
+  .nav-badge {
+    position: absolute; top: 2px; right: 10px;
+    background: #4a7c9e; color: white;
+    width: 16px; height: 16px; border-radius: 50%;
+    font-size: 9px; display: none;
+    align-items: center; justify-content: center;
+  }
+
+  /* ── SUCCESS ── */
+  .success-overlay {
+    position: absolute; inset: 0; background: rgba(13,13,13,.95);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    z-index: 100; opacity: 0; pointer-events: none; transition: opacity .3s;
+  }
+  .success-overlay.show { opacity: 1; pointer-events: all; }
+  .success-icon { font-size: 56px; margin-bottom: 16px; animation: bounce .5s ease; }
+  @keyframes bounce { 0%{transform:scale(0)} 60%{transform:scale(1.2)} 100%{transform:scale(1)} }
+  .success-text { font-family: 'Playfair Display', serif; font-size: 22px; color: var(--gold); margin-bottom: 6px; }
+  .success-sub { font-size: 13px; color: var(--text-muted); }
+
+  /* ── SETTINGS ── */
+  .profile-card {
+    background: linear-gradient(135deg, #1e1a14, #2a2010);
+    border: 1.5px solid var(--gold); border-radius: 18px; padding: 18px; margin-bottom: 18px;
+  }
+  .profile-avatar {
+    width: 56px; height: 56px; border-radius: 16px;
+    background: var(--gold); display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 700; color: var(--ink); margin-bottom: 10px;
+  }
+  .settings-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 14px; border-radius: 13px; cursor: pointer; transition: background .2s;
+  }
+  .settings-item:hover { background: var(--surface2); }
+  .settings-icon { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+  .settings-item-title { font-size: 14px; font-weight: 500; }
+  .settings-item-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+  .toggle {
+    width: 42px; height: 24px; background: var(--surface2);
+    border-radius: 12px; position: relative; cursor: pointer;
+    border: 1px solid var(--border); transition: background .2s; margin-left: auto;
+  }
+  .toggle.on { background: var(--gold); border-color: var(--gold); }
+  .toggle::after {
+    content: ''; position: absolute; top: 3px; left: 3px;
+    width: 16px; height: 16px; background: white; border-radius: 50%; transition: transform .2s;
+  }
+  .toggle.on::after { transform: translateX(18px); }
+  .logout-btn {
+    width: 100%; padding: 13px; background: transparent;
+    border: 1px solid var(--red); border-radius: 13px;
+    color: var(--red); font-family: 'DM Sans', sans-serif;
+    font-size: 14px; cursor: pointer; transition: background .2s; margin-top: 8px;
+  }
+  .logout-btn:hover { background: rgba(192,57,43,.1); }
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="notch"></div>
+
+  <!-- SUCCESS -->
+  <div class="success-overlay" id="successOverlay">
+    <div class="success-icon">✉️</div>
+    <div class="success-text">Message envoyé !</div>
+    <div class="success-sub">Le destinataire sera notifié.</div>
+  </div>
+
+  <!-- ── SCREEN AUTH ── -->
+  <div class="screen active" id="screenAuth">
+    <div class="auth-wrap">
+      <div class="auth-logo">
+        <div class="big-logo">SecretMsg</div>
+        <p>Messages confidentiels & sécurisés</p>
+      </div>
+
+      <div class="auth-tabs">
+        <div class="auth-tab active" id="tab-login" onclick="showTab('login')">Connexion</div>
+        <div class="auth-tab" id="tab-register" onclick="showTab('register')">Inscription</div>
+      </div>
+
+      <!-- LOGIN -->
+      <div class="auth-form" id="tabLogin">
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input class="form-input" id="loginEmail" type="email" placeholder="votre@email.com">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Mot de passe</label>
+          <input class="form-input" id="loginPass" type="password" placeholder="••••••••">
+        </div>
+        <div class="auth-error" id="authError"></div>
+        <button class="btn-gold" onclick="login()">Se connecter</button>
+      </div>
+
+      <!-- REGISTER -->
+      <div class="auth-form" id="tabRegister" style="display:none;">
+        <div class="form-group">
+          <label class="form-label">Votre prénom / pseudo</label>
+          <input class="form-input" id="regName" type="text" placeholder="ex: Sophie">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input class="form-input" id="regEmail" type="email" placeholder="votre@email.com">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Mot de passe</label>
+          <input class="form-input" id="regPass" type="password" placeholder="6 caractères minimum">
+        </div>
+        <div class="auth-error" id="authError"></div>
+        <button class="btn-gold" onclick="register()">Créer mon compte</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SCREEN MESSAGES ── -->
+  <div class="screen" id="screenMessages">
+    <div class="app-header">
+      <div class="logo">Secret<span>Msg</span></div>
+      <div class="icon-btn">🔔</div>
+    </div>
+
+    <div class="flashcard-container">
+      <div class="flashcard" onclick="flipCard(this)">
+        <div class="card-face card-front">
+          <div class="card-seal">🔐</div>
+          <div class="card-label">Message Secret</div>
+          <div class="card-hint">Appuyez pour révéler</div>
+        </div>
+        <div class="card-face card-back">
+          <div class="card-message-text">"Vos messages secrets arrivent ici, protégés par un code PIN."</div>
+          <div class="card-from">— SecretMsg ✦</div>
+        </div>
+      </div>
+    </div>
+    <div class="tap-hint">Appuyez sur la carte pour révéler</div>
+
+    <div class="section-title" style="font-size:15px;margin-bottom:10px;">Mes messages reçus</div>
+    <div class="msg-list" id="msgList">
+      <div style="text-align:center;color:var(--text-muted);padding:30px 0;font-size:13px;">Chargement…</div>
+    </div>
+  </div>
+
+  <!-- ── SCREEN COMPOSE ── -->
+  <div class="screen" id="screenCompose">
+    <div class="app-header">
+      <div class="logo">Secret<span>Msg</span></div>
+    </div>
+    <div class="section-title">Nouveau secret</div>
+    <div class="section-sub">Envoyez un message confidentiel</div>
+
+    <div class="form-group" style="margin-bottom:14px;">
+      <label class="form-label">Destinataire (email ou pseudo)</label>
+      <input class="form-input" id="sendTo" type="text" placeholder="email ou prénom exact">
+    </div>
+    <div class="form-group" style="margin-bottom:14px;">
+      <label class="form-label">Votre message secret</label>
+      <textarea class="form-textarea" id="sendMsg" placeholder="Écrivez votre message confidentiel…"></textarea>
+    </div>
+    <div class="form-group" style="margin-bottom:18px;">
+      <label class="form-label">Code de déverrouillage (4 chiffres)</label>
+      <input class="form-input" id="sendPin" type="password" inputmode="numeric" maxlength="4" placeholder="ex: 4782 — communiquez-le au destinataire">
+    </div>
+    <div class="auth-error" id="sendError" style="margin-bottom:10px;"></div>
+    <button class="btn-gold" id="sendBtn" onclick="sendMessage()">✦ Envoyer le message secret</button>
+  </div>
+
+  <!-- ── SCREEN UNLOCK ── -->
+  <div class="screen" id="screenUnlock">
+    <div class="app-header">
+      <div class="logo">Secret<span>Msg</span></div>
+      <div class="icon-btn" onclick="showScreen('screenMessages');setNav('nav-messages')">←</div>
+    </div>
+    <div class="unlock-center">
+      <div class="lock-icon">🔒</div>
+      <div class="unlock-title">Message Confidentiel</div>
+      <div class="unlock-sub" id="unlockSender">De : …</div>
+
+      <div class="pin-inputs" id="pinInputs">
+        <div class="pin-dot" id="p0">·</div>
+        <div class="pin-dot" id="p1">·</div>
+        <div class="pin-dot" id="p2">·</div>
+        <div class="pin-dot" id="p3">·</div>
+      </div>
+      <div class="pin-error" id="pinError"></div>
+
+      <div class="numpad">
+        <div class="num-key" onclick="pinInput('1')">1</div>
+        <div class="num-key" onclick="pinInput('2')">2</div>
+        <div class="num-key" onclick="pinInput('3')">3</div>
+        <div class="num-key" onclick="pinInput('4')">4</div>
+        <div class="num-key" onclick="pinInput('5')">5</div>
+        <div class="num-key" onclick="pinInput('6')">6</div>
+        <div class="num-key" onclick="pinInput('7')">7</div>
+        <div class="num-key" onclick="pinInput('8')">8</div>
+        <div class="num-key" onclick="pinInput('9')">9</div>
+        <div class="num-key wide" onclick="pinInput('0')">0</div>
+        <div class="num-key del" onclick="pinDel()">⌫</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SCREEN REVEAL ── -->
+  <div class="screen" id="screenReveal">
+    <div class="app-header">
+      <div class="logo">Secret<span>Msg</span></div>
+      <div class="icon-btn" onclick="showScreen('screenMessages');setNav('nav-messages')">←</div>
+    </div>
+    <div class="section-title" style="margin-bottom:4px;">Message déchiffré</div>
+    <div class="section-sub">Appuyez sur la carte pour lire</div>
+
+    <div class="flashcard-container" style="margin-top:16px;">
+      <div class="flashcard" id="revealCard" onclick="flipCard(this)">
+        <div class="card-face card-front" style="background:linear-gradient(135deg,#14181e,#18242a);border-color:#4a7c9e;">
+          <div class="card-seal" style="background:radial-gradient(circle,#4a7c9e 0%,#2a5a7e 100%);">🔓</div>
+          <div class="card-label" style="color:#4a7c9e;">Déchiffré</div>
+          <div class="card-hint">Appuyez pour lire</div>
+        </div>
+        <div class="card-face card-back">
+          <div class="card-message-text" id="revealText"></div>
+          <div class="card-from" id="revealFrom"></div>
+        </div>
+      </div>
+    </div>
+    <div class="tap-hint">Retournez la carte pour lire votre message</div>
+
+    <div style="display:flex;gap:10px;margin-top:auto;">
+      <button style="flex:1;padding:13px;background:var(--surface2);border:1px solid var(--border);border-radius:13px;color:var(--red);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer;" onclick="showScreen('screenMessages');setNav('nav-messages')">
+        ← Retour
+      </button>
+      <button style="flex:1;padding:13px;background:var(--surface2);border:1px solid var(--border);border-radius:13px;color:var(--cream);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer;" onclick="showScreen('screenCompose');setNav('nav-compose')">
+        ↩ Répondre
+      </button>
+    </div>
+  </div>
+
+  <!-- ── SCREEN SETTINGS ── -->
+  <div class="screen" id="screenSettings">
+    <div class="app-header">
+      <div class="logo">Secret<span>Msg</span></div>
+    </div>
+    <div class="section-title">Mon profil</div>
+
+    <div class="profile-card">
+      <div class="profile-avatar" id="profileAvatar">?</div>
+      <div style="font-size:16px;font-weight:600;" id="profileName">…</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:3px;">Membre SecretMsg</div>
+    </div>
+
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--gold);padding:0 14px 8px;">Sécurité</div>
+    <div class="settings-item">
+      <div class="settings-icon" style="background:rgba(74,124,158,.1);">👁</div>
+      <div>
+        <div class="settings-item-title">Notifications discrètes</div>
+        <div class="settings-item-sub">Sans afficher le contenu</div>
+      </div>
+      <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+    </div>
+    <div class="settings-item">
+      <div class="settings-icon" style="background:rgba(192,57,43,.1);">💣</div>
+      <div>
+        <div class="settings-item-title">Auto-destruction</div>
+        <div class="settings-item-sub">Supprimer après lecture</div>
+      </div>
+      <div class="toggle" onclick="this.classList.toggle('on')"></div>
+    </div>
+
+    <div style="margin-top:auto;">
+      <button class="logout-btn" onclick="logout()">🚪 Se déconnecter</button>
+    </div>
+  </div>
+
+  <!-- ── BOTTOM NAV ── -->
+  <div class="bottom-nav" id="bottomNav" style="display:none;">
+    <div class="nav-item active" id="nav-messages" onclick="showScreen('screenMessages');setNav('nav-messages')">
+      <div class="nav-icon">💌</div>
+      <div id="unreadBadge" class="nav-badge"></div>
+      <span>Messages</span>
+    </div>
+    <div class="nav-item" id="nav-compose" onclick="showScreen('screenCompose');setNav('nav-compose')">
+      <div class="nav-icon">✏️</div>
+      <span>Composer</span>
+    </div>
+    <div class="nav-item" id="nav-settings" onclick="showScreen('screenSettings');setNav('nav-settings')">
+      <div class="nav-icon">👤</div>
+      <span>Profil</span>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  // Show bottom nav only when logged in
+  import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+  import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+  const apps = getApps();
+  if (apps.length > 0) {
+    const auth = getAuth(apps[0]);
+    onAuthStateChanged(auth, user => {
+      document.getElementById('bottomNav').style.display = user ? 'flex' : 'none';
+      if (user) {
+        const name = user.displayName || user.email;
+        const el = document.getElementById('profileAvatar');
+        if (el) el.textContent = name.charAt(0).toUpperCase();
+      }
+    });
+  }
+</script>
+</body>
+</html>
